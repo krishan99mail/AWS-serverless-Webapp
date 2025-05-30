@@ -57,6 +57,8 @@ Upload frontend:aws s3 sync frontend/ s3://frontend-s-hosting123xxx --region us-
 
 Test at http://frontend-s-hosting123xxx.s3-website-us-east-1.amazonaws.com.
 
+
+
 Template.yaml
 AWSTemplateFormatVersion: '2010-09-09'
 Resources:
@@ -145,6 +147,11 @@ Outputs:
     Value: !Sub 'https://${ItemsApi}.execute-api.${AWS::Region}.amazonaws.com/prod'
   WebsiteUrl:
     Value: !Sub 'http://${S3Bucket}.s3-website-${AWS::Region}.amazonaws.com'
+
+
+
+
+    
 
 Troubleshooting
 
