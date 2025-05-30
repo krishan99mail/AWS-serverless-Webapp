@@ -1,3 +1,6 @@
+#This is the file when your create Lambda functions.this is the code you have to run with Lambda Function for the DynamoBD Connection.
+#And you can run test function for the verification.
+
 const { DynamoDBClient } = require("@aws-sdk/client-dynamodb");
 const { DynamoDBDocumentClient, DeleteCommand, GetCommand, PutCommand, ScanCommand } = require("@aws-sdk/lib-dynamodb");
 
