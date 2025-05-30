@@ -1,0 +1,350 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: |
+  CloudFormation template for the Items Data Store Project, creating an S3 bucket for static website hosting,
+  HTTP API with Lambda integration, DynamoDB table for item data, SQS queue for async processing, and necessary
+  permissions. Includes CORS configuration for the frontend hosted at http://frontend-s-hosting123456x.s3-website-us-east-1.amazonaws.com and https://frontend-s-hosting123456x.s3.us-east-1.amazonaws.com.
+
+Resources:
+  # S3 Bucket for Frontend
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: frontend-s-hosting123456x
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: error.html
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+      CorsConfiguration:
+        CorsRules:
+          - AllowedOrigins:
+              - http://frontend-s-hosting123456x.s3-website-us-east-1.amazonaws.com
+              - https://frontend-s-hosting123456x.s3.us-east-1.amazonaws.com
+            AllowedMethods:
+              - GET
+              - HEAD
+            AllowedHeaders:
+              - '*'
+            MaxAge: 3600
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action: 's3:GetObject'
+            Resource: !Sub arn:aws:s3:::frontend-s-hosting123456x/*
+
+  # DynamoDB Table
+  ItemDynamoDBTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: itemId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: itemId
+          KeyType: HASH
+      ProvisionedThroughput:
+        ReadCapacityUnits: 1
+        WriteCapacityUnits: 1
+      TableName: all-items
+
+  # SQS Queue
+  ItemsAsyncQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: items-async-queue
+
+  # HTTP API
+  ItemAPI:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Description: HTTP API for Items Data Store
+      Name: items-api
+      ProtocolType: HTTP
+      CorsConfiguration:
+        AllowOrigins:
+          - http://frontend-s-hosting123456x.s3-website-us-east-1.amazonaws.com
+          - https://frontend-s-hosting123456x.s3.us-east-1.amazonaws.com
+        AllowMethods:
+          - GET
+          - POST
+          - PUT
+          - DELETE
+          - OPTIONS
+        AllowHeaders:
+          - content-type
+          - authorization
+          - accept
+        MaxAge: 3600
+        AllowCredentials: false
+
+  # API Stage
+  ItemAPIStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref ItemAPI
+      StageName: prod
+      AutoDeploy: true
+      AccessLogSettings:
+        DestinationArn: !GetAtt APIGatewayLogGroup.Arn
+        Format: '$context.identity.sourceIp $context.requestTime "$context.httpMethod $context.path $context.protocol" $context.status $context.responseLength $context.requestId'
+
+  # CloudWatch Log Group for API Gateway
+  APIGatewayLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/apigateway/${ItemAPI}/prod
+      RetentionInDays: 7
+
+  # API Routes
+  ItemAPIGetItemsRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ItemAPI
+      RouteKey: GET /items
+      Target: !Sub integrations/${ItemIntegration}
+    DependsOn: ItemIntegration
+  ItemAPIPostItemsRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ItemAPI
+      RouteKey: POST /items
+      Target: !Sub integrations/${ItemIntegration}
+    DependsOn: ItemIntegration
+  ItemAPIGetItemRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ItemAPI
+      RouteKey: GET /items/{id}
+      Target: !Sub integrations/${ItemIntegration}
+    DependsOn: ItemIntegration
+  ItemAPIPutItemsRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ItemAPI
+      RouteKey: PUT /items
+      Target: !Sub integrations/${ItemIntegration}
+    DependsOn: ItemIntegration
+  ItemAPIDeleteItemRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ItemAPI
+      RouteKey: DELETE /items/{id}
+      Target: !Sub integrations/${ItemIntegration}
+    DependsOn: ItemIntegration
+  ItemAPIOptionsItemsRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ItemAPI
+      RouteKey: OPTIONS /items
+      Target: !Sub integrations/${ItemIntegration}
+    DependsOn: ItemIntegration
+  ItemAPIOptionsItemRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ItemAPI
+      RouteKey: OPTIONS /items/{id}
+      Target: !Sub integrations/${ItemIntegration}
+    DependsOn: ItemIntegration
+
+  # API Integration
+  ItemIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref ItemAPI
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt ItemLambdaFunction.Arn
+      PayloadFormatVersion: 2.0
+
+  # Lambda Function
+  ItemLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: nodejs18.x
+      Role: !GetAtt ItemFunctionExecutionRole.Arn
+      Handler: index.handler
+      Code:
+        ZipFile: |
+          const { DynamoDBClient } = require("@aws-sdk/client-dynamodb");
+          const { DynamoDBDocumentClient, DeleteCommand, GetCommand, PutCommand, ScanCommand } = require("@aws-sdk/lib-dynamodb");
+
+          const client = new DynamoDBClient({});
+          const dynamo = DynamoDBDocumentClient.from(client);
+
+          exports.handler = async (event, context) => {
+            let body;
+            let statusCode = 200;
+            const headers = {
+              "Content-Type": "application/json",
+              "Access-Control-Allow-Origin": event.headers?.origin === "https://frontend-s-hosting123456x.s3.us-east-1.amazonaws.com" ? "https://frontend-s-hosting123456x.s3.us-east-1.amazonaws.com" : "http://frontend-s-hosting123456x.s3-website-us-east-1.amazonaws.com",
+              "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
+              "Access-Control-Allow-Headers": "content-type,authorization,accept",
+              "Access-Control-Max-Age": "3600"
+            };
+            console.log("Full event:", JSON.stringify(event, null, 2));
+
+            try {
+              if (!event.routeKey) {
+                throw new Error(`Missing routeKey: ${JSON.stringify(event)}`);
+              }
+
+              switch (event.routeKey) {
+                case "DELETE /items/{id}":
+                  if (!event.pathParameters || !event.pathParameters.id) {
+                    throw new Error("Missing path parameter: id");
+                  }
+                  await dynamo.send(
+                    new DeleteCommand({
+                      TableName: "all-items",
+                      Key: {
+                        itemId: event.pathParameters.id
+                      }
+                    })
+                  );
+                  body = `Deleted item ${event.pathParameters.id}`;
+                  break;
+                case "GET /items/{id}":
+                  if (!event.pathParameters || !event.pathParameters.id) {
+                    throw new Error("Missing path parameter: id");
+                  }
+                  const getResult = await dynamo.send(
+                    new GetCommand({
+                      TableName: "all-items",
+                      Key: {
+                        itemId: event.pathParameters.id
+                      }
+                    })
+                  );
+                  body = getResult.Item || {};
+                  break;
+                case "GET /items":
+                  const scanResult = await dynamo.send(
+                    new ScanCommand({ TableName: "all-items" })
+                  );
+                  body = scanResult.Items || [];
+                  break;
+                case "POST /items":
+                  if (!event.body) {
+                    throw new Error("Missing request body");
+                  }
+                  let postJSON = JSON.parse(event.body);
+                  if (!postJSON.itemId || !postJSON.name || !postJSON.price) {
+                    throw new Error("Missing required fields: itemId, name, price");
+                  }
+                  await dynamo.send(
+                    new PutCommand({
+                      TableName: "all-items",
+                      Item: {
+                        itemId: postJSON.itemId,
+                        name: postJSON.name,
+                        price: postJSON.price
+                      }
+                    })
+                  );
+                  body = `Posted item ${postJSON.itemId}`;
+                  break;
+                case "PUT /items":
+                  if (!event.body) {
+                    throw new Error("Missing request body");
+                  }
+                  let putJSON = JSON.parse(event.body);
+                  if (!putJSON.itemId || !putJSON.name || !putJSON.price) {
+                    throw new Error("Missing required fields: itemId, name, price");
+                  }
+                  await dynamo.send(
+                    new PutCommand({
+                      TableName: "all-items",
+                      Item: {
+                        itemId: putJSON.itemId,
+                        name: putJSON.name,
+                        price: putJSON.price
+                      }
+                    })
+                  );
+                  body = `Updated item ${putJSON.itemId}`;
+                  break;
+                case "OPTIONS /items":
+                case "OPTIONS /items/{id}":
+                  body = "";
+                  statusCode = 204;
+                  break;
+                default:
+                  throw new Error(`Unsupported route: ${event.routeKey}`);
+              }
+            } catch (err) {
+              statusCode = 400;
+              body = err.message;
+              console.error("Error:", err);
+            } finally {
+              body = JSON.stringify(body);
+            }
+
+            return {
+              statusCode,
+              body,
+              headers
+            };
+          };
+      Timeout: 30
+
+  # Lambda Permissions
+  APIInvokeLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ItemLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ItemAPI}/*/*
+
+  # IAM Role for Lambda
+  ItemFunctionExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Policies:
+        - PolicyName: LambdaExecutionPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:*
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Scan
+                Resource: !GetAtt ItemDynamoDBTable.Arn
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                Resource: !GetAtt ItemsAsyncQueue.Arn
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+Outputs:
+  InvokeURL:
+    Description: API Gateway Invoke URL
+    Value: !Sub https://${ItemAPI}.execute-api.${AWS::Region}.amazonaws.com/prod
+  S3WebsiteEndpoint:
+    Description: S3 Website Endpoint
+    Value: !Sub http://${FrontendBucket}.s3-website-us-east-1.amazonaws.com
